@@ -1,0 +1,35 @@
+rom sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import classification_report, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+
+# Filter the delayed flights from the first stage
+delayed_indices = (y_pred_rf == 1)  # Flights predicted as delayed in the first stage
+X_test_delayed = X_test[delayed_indices]  # Features of delayed flights
+y_test_delayed_actual = data.iloc[X_test_delayed.index]['delay_severity']  # Actual severity labels for delayed flights
+
+# Prepare the second-stage training data
+data_delayed = data[data['delay_severity'].notna()]  # Keep only delayed flights (delay_severity > 0)
+X_delayed = data_delayed.drop(columns=['is_delayed', 'delay_severity'])  # Drop irrelevant columns
+y_delayed = data_delayed['delay_severity']  # Severity labels (1: Minor, 2: Major)
+
+# Train-test split for the second stage
+X_train_delayed, X_test_delayed, y_train_delayed, y_test_delayed = train_test_split(
+    X_delayed, y_delayed, test_size=0.3, random_state=42
+)
+
+# Fit a Decision Tree Classifier for Minor vs Major delays
+dt_model = DecisionTreeClassifier(random_state=42, max_depth=5, class_weight='balanced')
+dt_model.fit(X_train_delayed, y_train_delayed)
+
+# Make predictions on delayed flights
+y_pred_dt = dt_model.predict(X_test_delayed)
+
+# Evaluate the second-stage model
+print("Second Stage: Minor vs Major Delays")
+print(classification_report(y_test_delayed, y_pred_dt, target_names=['Minor Delay', 'Major Delay']))
+
+# Plot confusion matrix for the second stage
+ConfusionMatrixDisplay.from_estimator(dt_model, X_test_delayed, y_test_delayed,
+                                       display_labels=['Minor Delay', 'Major Delay'], cmap=plt.cm.Blues)
+plt.title("Confusion Matrix for Minor vs Major Delays")
+plt.show()
