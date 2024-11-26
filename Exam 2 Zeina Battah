@@ -1,9 +1,8 @@
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, ConfusionMatrixDisplay
 import pandas as pd
 import numpy as np
@@ -30,7 +29,7 @@ def preprocess_data(data):
 
     return data
 
-# Load the dataset
+# Load and preprocess the dataset
 data = pd.read_csv('flight_data_full.csv')
 data = preprocess_data(data)
 
@@ -38,86 +37,71 @@ data = preprocess_data(data)
 categorical_cols = ['carrier', 'origin', 'type', 'manufacturer', 'model', 'engine']
 numerical_cols = ['hour', 'seats', 'carrier_delay', 'origin_delay', 'dest_delay', 'flight_volume', 'temp', 'humid']
 
-# Define preprocessing pipeline
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', StandardScaler(), numerical_cols),  # Scale numerical columns
-        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_cols)  # One-hot encode categorical columns
-    ]
-)
+# One-hot encode categorical columns
+encoder = OneHotEncoder(handle_unknown='ignore')
+encoded_cats = encoder.fit_transform(data[categorical_cols]).toarray()
+encoded_cat_cols = encoder.get_feature_names_out(categorical_cols)
+
+# Scale numerical columns
+scaler = StandardScaler()
+scaled_nums = scaler.fit_transform(data[numerical_cols])
+
+# Combine processed features
+X_full = np.hstack([scaled_nums, encoded_cats])
+X = pd.DataFrame(X_full, columns=list(numerical_cols) + list(encoded_cat_cols))
 
 # -----------------------------
 # First Stage: On-time vs Delayed
 # -----------------------------
-
-# Separate features and target
-X = data.drop(columns=['is_delayed', 'delay_severity'])
-y = data['is_delayed']
+y_first_stage = data['is_delayed']
 
 # Split into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y_first_stage, test_size=0.3, random_state=42)
 
-# Define Random Forest model for first stage
+# Train Random Forest model for the first stage
 rf_model = RandomForestClassifier(
     class_weight='balanced', ccp_alpha=0, max_depth=None, min_samples_split=2, max_features='sqrt', n_estimators=200, random_state=42
 )
+rf_model.fit(X_train, y_train)
 
-# Create a pipeline for first-stage model
-pipeline_rf = Pipeline(steps=[('preprocessor', preprocessor), ('model', rf_model)])
-pipeline_rf.fit(X_train, y_train)
-
-# Evaluate first stage
-y_pred_rf = pipeline_rf.predict(X_test)
-y_pred_prob_rf = pipeline_rf.predict_proba(X_test)[:, 1]  # Probability for delayed class
-threshold = 0.15  # Adjusted threshold
-y_pred_adjusted_rf = (y_pred_prob_rf >= threshold).astype(int)  # Thresholded predictions
-
-print("First Stage: On-time vs Delayed (Threshold Adjusted)")
-print(classification_report(y_test, y_pred_adjusted_rf, target_names=['On-time', 'Delayed']))
+# Evaluate the first stage
+y_pred_rf = rf_model.predict(X_test)
+print("First Stage: On-time vs Delayed")
+print(classification_report(y_test, y_pred_rf, target_names=['On-time', 'Delayed']))
 
 # -----------------------------
 # Second Stage: Minor vs Major Delays
 # -----------------------------
-
-# Filter for delayed flights
-delayed_indices = (y_pred_adjusted_rf == 1)  # Flights predicted as delayed in the first stage
+# Use only delayed flights predicted by the first stage
+delayed_indices = (y_pred_rf == 1)  # Flights predicted as delayed
 X_test_delayed = X_test[delayed_indices]  # Features of delayed flights
-y_test_delayed_actual = data.iloc[X_test_delayed.index]['delay_severity']  # Actual severity labels for delayed flights
+y_test_delayed_actual = data.iloc[X_test_delayed.index]['delay_severity']  # True delay severity
 
-# Prepare the second-stage training data
+# Prepare second stage training data
 data_delayed = data[data['delay_severity'].notna()]  # Keep only delayed flights
-X_delayed = data_delayed.drop(columns=['is_delayed', 'delay_severity'])  # Drop irrelevant columns
-y_delayed = data_delayed['delay_severity']  # Severity labels (1: Minor, 2: Major)
+X_delayed_full = pd.concat(
+    [pd.DataFrame(scaler.transform(data_delayed[numerical_cols]), columns=numerical_cols),
+     pd.DataFrame(encoder.transform(data_delayed[categorical_cols]).toarray(), columns=encoded_cat_cols)], axis=1
+)
+y_delayed = data_delayed['delay_severity']  # Minor (1) or Major (2)
 
-# Train-test split for the second stage
+# Split delayed data into training and testing sets for the second stage
 X_train_delayed, X_test_delayed, y_train_delayed, y_test_delayed = train_test_split(
-    X_delayed, y_delayed, test_size=0.3, random_state=42
+    X_delayed_full, y_delayed, test_size=0.3, random_state=42
 )
 
-# Define Decision Tree model for second stage
+# Train Decision Tree Classifier for the second stage
 dt_model = DecisionTreeClassifier(random_state=42, max_depth=5, class_weight='balanced')
+dt_model.fit(X_train_delayed, y_train_delayed)
 
-# Create a pipeline for second-stage model
-pipeline_dt = Pipeline(steps=[('preprocessor', preprocessor), ('model', dt_model)])
-pipeline_dt.fit(X_train_delayed, y_train_delayed)
+# Predict and evaluate for delayed flights
+y_pred_dt = dt_model.predict(X_test_delayed)
 
-# Make predictions on delayed flights
-y_pred_dt = pipeline_dt.predict(X_test_delayed)
-
-# Evaluate second stage
 print("Second Stage: Minor vs Major Delays")
 print(classification_report(y_test_delayed, y_pred_dt, target_names=['Minor Delay', 'Major Delay']))
 
-# Confusion Matrix for second stage
-ConfusionMatrixDisplay.from_estimator(pipeline_dt, X_test_delayed, y_test_delayed,
+# Plot confusion matrix for the second stage
+ConfusionMatrixDisplay.from_estimator(dt_model, X_test_delayed, y_test_delayed,
                                        display_labels=['Minor Delay', 'Major Delay'], cmap=plt.cm.Blues)
 plt.title("Confusion Matrix for Minor vs Major Delays")
 plt.show()
-
-# -----------------------------
-# Save Models and Preprocessing Pipeline
-# -----------------------------
-with open('first_stage_rf.pkl', 'wb') as f:
-    pickle.dump(pipeline_rf, f)
-with open('second_stage_dt.pkl', 'wb') as f:
-    pickle.dump(pipeline_dt, f)
