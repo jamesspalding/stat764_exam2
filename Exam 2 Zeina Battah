@@ -1,11 +1,12 @@
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.metrics import classification_report, ConfusionMatrixDisplay
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import pickle
 
 # Function to preprocess data
 def preprocess_data(data):
@@ -40,54 +41,26 @@ encoder = OneHotEncoder(handle_unknown='ignore')
 encoded_cats = encoder.fit_transform(data[categorical_cols]).toarray()
 encoded_cat_cols = encoder.get_feature_names_out(categorical_cols)
 
-# Scale numerical columns
-scaler = StandardScaler()
-scaled_nums = scaler.fit_transform(data[numerical_cols])
-
-# Combine processed features
-X_full = np.hstack([scaled_nums, encoded_cats])
-X = pd.DataFrame(X_full, columns=list(numerical_cols) + list(encoded_cat_cols))
-
-# -----------------------------
-# First Stage: On-time vs Delayed
-# -----------------------------
-y_first_stage = data['is_delayed']
-
-X_train, X_test, y_train, y_test = train_test_split(X, y_first_stage, test_size=0.3, random_state=42)
-
-rf_model = RandomForestClassifier(
-    class_weight='balanced', ccp_alpha=0, max_depth=None, min_samples_split=2,
-    max_features='sqrt', n_estimators=200, random_state=42
+# Combine processed features without scaling numerical columns
+X_full = pd.concat(
+    [data[numerical_cols].reset_index(drop=True), pd.DataFrame(encoded_cats, columns=encoded_cat_cols).reset_index(drop=True)],
+    axis=1
 )
-
-rf_model.fit(X_train, y_train)
-y_pred_rf = rf_model.predict(X_test)
-
-print("First Stage: On-time vs Delayed")
-print(classification_report(y_test, y_pred_rf, target_names=['On-time', 'Delayed']))
-
-# Adjusted threshold
-y_pred_prob_rf = rf_model.predict_proba(X_test)[:, 1]  # Probability for delayed class
-threshold = 0.15  # Adjusted threshold
-y_pred_adjusted_rf = (y_pred_prob_rf >= threshold).astype(int)  # Thresholded predictions
-
-print("First Stage (Adjusted Threshold): On-time vs Delayed")
-print(classification_report(y_test, y_pred_adjusted_rf, target_names=['On-time', 'Delayed']))
 
 # -----------------------------
 # Second Stage: Minor vs Major Delays
 # -----------------------------
-
 # Use only delayed flights predicted by the first stage
-delayed_indices = (y_pred_adjusted_rf == 1)  # Flights predicted as delayed
+delayed_indices = (y_pred == 1)  # Flights predicted as delayed
 X_test_delayed = X_test[delayed_indices]  # Features of delayed flights
 y_test_delayed_actual = data.iloc[X_test_delayed.index]['delay_severity']  # True delay severity
 
-# Prepare second-stage training data
+# Prepare second stage training data
 data_delayed = data[data['delay_severity'].notna()]  # Keep only delayed flights
 X_delayed_full = pd.concat(
-    [pd.DataFrame(scaler.transform(data_delayed[numerical_cols]), columns=numerical_cols),
-     pd.DataFrame(encoder.transform(data_delayed[categorical_cols]).toarray(), columns=encoded_cat_cols)], axis=1
+    [data_delayed[numerical_cols].reset_index(drop=True),
+     pd.DataFrame(encoder.transform(data_delayed[categorical_cols]).toarray(), columns=encoded_cat_cols).reset_index(drop=True)], 
+    axis=1
 )
 y_delayed = data_delayed['delay_severity']  # Minor (1) or Major (2)
 
@@ -96,6 +69,7 @@ X_train_delayed, X_test_delayed, y_train_delayed, y_test_delayed = train_test_sp
     X_delayed_full, y_delayed, test_size=0.3, random_state=42
 )
 
+# Train Decision Tree Classifier for the second stage
 dt_model = DecisionTreeClassifier(random_state=42, max_depth=5, class_weight='balanced')
 dt_model.fit(X_train_delayed, y_train_delayed)
 
