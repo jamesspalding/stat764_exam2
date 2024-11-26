@@ -1,9 +1,146 @@
-rom sklearn.tree import DecisionTreeClassifier
+#imports
+import pandas as pd
+import numpy as np
+import warnings
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score, cohen_kappa_score
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, train_test_split
+from sklearn.decomposition import PCA
+from pickle import dump,load
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.linear_model import LinearRegression
+
+def cohen_kappa_scorer(estimator, X, y):
+    y_pred = estimator.predict(X)
+    return cohen_kappa_score(y, y_pred)
+
+##### Data #####
+data = pd.read_csv('flight_data_full.csv')
+data = data.drop(['Unnamed: 0','air_time','year', 'month', 'day', 'dest', 'dep_time'],axis=1)
+
+x = data.drop(['dep_delay', 'delay_severity', 'is_delayed'],axis=1)
+x = pd.get_dummies(x,dtype=int)
+y = data['is_delayed']
+
+#split data
+x_train, x_test, y_train, y_test = train_test_split(x,y,train_size=.7,random_state=764)
+
+dc = DecisionTreeClassifier(class_weight='balanced')
+
+param_grid = {
+    'max_depth': [None, 2, 5, 7, 10],
+    'min_samples_split': [2, 3, 5, 10, 20],
+    'min_impurity_decrease': [0.0, 0.01, 0.1],
+    'ccp_alpha': [0.0, 0.1, 0.2, 0.5, 0.7, 1.0] 
+}
+
+grid_search = GridSearchCV(estimator=dc, param_grid=param_grid, cv=5, n_jobs=-1, verbose=0, scoring=cohen_kappa_scorer)
+
+grid_search.fit(x_train, y_train)
+best_tree = grid_search.best_estimator_
+y_pred = best_tree.predict(x_test)
+best_params = grid_search.best_params_
+print(f"Best parameters: {best_params}")
+
+#Best parameters: {'ccp_alpha': 0.0, 'max_depth': None, 'min_impurity_decrease': 0.1, 'min_samples_split': 2}
+
+rf = RandomForestClassifier(class_weight='balanced',ccp_alpha=0,max_depth=None,min_impurity_decrease=0.1,min_samples_split=2)
+
+param_grid = {
+    'n_estimators': [50, 70, 90, 100, 150, 200, 300],
+    'max_features': ['auto', 'sqrt', 'log2', None]
+}
+
+grid_search = GridSearchCV(estimator=rf, param_grid=param_grid, cv=5, n_jobs=-1, verbose=0, scoring=cohen_kappa_scorer)
+
+grid_search.fit(x_train, y_train)
+best_tree = grid_search.best_estimator_
+print(grid_search.best_score_)
+y_pred = best_tree.predict(x_test)
+best_params = grid_search.best_params_
+print(f"Best parameters: {best_params}")
+
+#Best parameters: {'max_features': 'auto', 'n_estimators': 50}, kappa = .457
+
+rf = RandomForestClassifier(class_weight='balanced',ccp_alpha=0,max_depth=None,min_samples_split=2,
+                            max_features='sqrt',n_estimators=200)
+
+rf.fit(x_train, y_train)
+y_pred = rf.predict(x_test)
+print(classification_report(y_test, y_pred))
+
+y_pred_prob = rf.predict_proba(x_test)[:, 1]
+threshold = 0.15 #.79 both
+y_pred_adjusted = (y_pred_prob >= threshold).astype(int)
+
+print("Adjusted Threshold Classification Report:\n", classification_report(y_test, y_pred_adjusted))
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import classification_report, ConfusionMatrixDisplay
 import matplotlib.pyplot as plt
+import pandas as pd
 
-# Filter the delayed flights from the first stage
-delayed_indices = (y_pred_rf == 1)  # Flights predicted as delayed in the first stage
+# Load the dataset
+data = pd.read_csv('flight_data_full.csv')
+
+# Drop unnecessary columns
+data = data.drop(columns=['Unnamed: 0', 'air_time', 'year', 'month', 'day', 'dest', 'dep_time', 'day_of_week'])
+
+# Step 1: Create the 'is_delayed' column (On-time vs Delayed)
+data['is_delayed'] = data['dep_delay'].apply(lambda x: 1 if x >= 30 else 0)  # 0 = On-time, 1 = Delayed
+
+# Step 2: Create the 'delay_severity' column for second stage (Minor vs Major)
+def recode_delay_severity(row):
+    if row['dep_delay'] < 30:
+        return None  # Exclude on-time flights
+    elif 30 <= row['dep_delay'] <= 120:
+        return 1  # Minor delay
+    else:
+        return 2  # Major delay
+
+data['delay_severity'] = data.apply(recode_delay_severity, axis=1)
+
+# Drop dep_delay to avoid leakage
+data = data.drop(columns=['dep_delay'])
+
+# One-hot encode categorical columns
+categorical_cols = ['carrier', 'origin', 'type', 'manufacturer', 'model', 'engine']
+data = pd.get_dummies(data, columns=categorical_cols, drop_first=True)
+
+# First Stage Random Forest: On-time vs Delayed
+X = data.drop(columns=['is_delayed', 'delay_severity'])
+y = data['is_delayed']
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+rf_model = RandomForestClassifier(
+    class_weight='balanced',
+    ccp_alpha=0,
+    max_depth=None,
+    min_samples_split=2,
+    max_features='sqrt',
+    n_estimators=200,
+    random_state=42
+)
+rf_model.fit(X_train, y_train)
+
+y_pred_rf = rf_model.predict(X_test)
+y_pred_prob = rf_model.predict_proba(X_test)[:, 1]  # Probability for delayed class
+threshold = 0.15  # Adjusted threshold
+y_pred_adjusted = (y_pred_prob >= threshold).astype(int)  # Thresholded predictions
+
+print("First Stage: On-time vs Delayed (Threshold Adjusted)")
+print(classification_report(y_test, y_pred_adjusted, target_names=['On-time', 'Delayed']))
+
+# Use only delayed flights for the second stage
+delayed_indices = (y_pred_adjusted == 1)  # Flights predicted as delayed in the first stage
 X_test_delayed = X_test[delayed_indices]  # Features of delayed flights
 y_test_delayed_actual = data.iloc[X_test_delayed.index]['delay_severity']  # Actual severity labels for delayed flights
 
